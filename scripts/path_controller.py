@@ -31,9 +31,13 @@ DIST_TOLERANCE = VOXEL_SIZE/2
 
 ANGLE_TOLERANCE = 5
 
-ANGULAR_VEL = 0.2
+ANGULAR_VEL_MIN = 0.05
+ANGULAR_VEL_MAX = 0.2
+ANGULAR_VEL_FACTOR = 0.2
 
-LINEAR_VEL = 0.1
+LINEAR_VEL_MIN = 0.05
+LINEAR_VEL_MAX = 0.4
+LINEAR_VEL_FACTOR = 0.2
 
 COLLISION_TOLERANCE = 0.13
 
@@ -42,6 +46,25 @@ def WIDTH():
 
 def HEIGTH():
     return Y_NEGATIVE_AXIS_SIZE + Y_POSITIVE_AXIS_SIZE
+
+def computeAngularVelocity(diff):
+    sign = 1
+    if diff < 0:
+        sign = -1
+    vel = abs(ANGULAR_VEL_FACTOR*diff)
+    if vel > ANGULAR_VEL_MAX:
+        vel = ANGULAR_VEL_MAX
+    elif vel < ANGULAR_VEL_MIN:
+        vel = ANGULAR_VEL_MIN
+    return sign*vel
+
+def computeLinearVelocity(distance):
+    vel = LINEAR_VEL_FACTOR*distance
+    if vel > LINEAR_VEL_MAX:
+        vel = LINEAR_VEL_MAX
+    elif vel < LINEAR_VEL_MIN:
+        vel = LINEAR_VEL_MIN
+    return vel
 
 def mountMap():
     rows = int(HEIGTH()/VOXEL_SIZE)
@@ -241,10 +264,7 @@ def robotAlign(position, angle, goal, last_ang_vel):
     if abs(diff) < ANGLE_TOLERANCE*math.pi/180 or diff*last_ang_vel < 0:
         return 0
 
-    if diff < 0:
-        return -ANGULAR_VEL
-    
-    return ANGULAR_VEL
+    return computeAngularVelocity(diff)
  
 def move(position, angle, goal, goal_dir, last_action):
     action = [0, 0]
@@ -258,11 +278,7 @@ def move(position, angle, goal, goal_dir, last_action):
 
     action[1] = robotAlign(position, angle, goal, last_action[1])
     if action[1] == 0:
-        action[0] = 0.2 * distance
-        if action[0] > 0.2:
-            action[0] = 0.2
-        if action[0] < 0.05:
-            action[0] = 0.05
+        action[0] = computeLinearVelocity(distance)
 
     return action
 
