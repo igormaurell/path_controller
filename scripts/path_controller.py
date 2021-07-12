@@ -26,13 +26,14 @@ X_NEGATIVE_AXIS_SIZE = 3
 Y_POSITIVE_AXIS_SIZE = 3
 Y_NEGATIVE_AXIS_SIZE = 3
 VOXEL_SIZE = 0.05
+VOXEL_SIZE_MIN = 0.01
 
 DIST_TOLERANCE = VOXEL_SIZE/2
 
 ANGLE_TOLERANCE = 5
 
-ANGULAR_VEL_MIN = 0.05
-ANGULAR_VEL_MAX = 0.2
+ANGULAR_VEL_MIN = 0.1
+ANGULAR_VEL_MAX = 0.4
 ANGULAR_VEL_FACTOR = 0.2
 
 LINEAR_VEL_MIN = 0.05
@@ -40,6 +41,7 @@ LINEAR_VEL_MAX = 0.4
 LINEAR_VEL_FACTOR = 0.2
 
 COLLISION_TOLERANCE = 0.13
+DANGER_TOLERANCE = 0.23
 
 def WIDTH():
     return X_NEGATIVE_AXIS_SIZE + X_POSITIVE_AXIS_SIZE
@@ -111,15 +113,19 @@ def markLaserScan(ranges, map, position, angle):
             markMapDiscretizedPoint(point_d, map, value = 1)
             
             #marking danger-zone
-            kernel_size = math.ceil(COLLISION_TOLERANCE/VOXEL_SIZE)
+            collision_kernel_size = math.ceil(COLLISION_TOLERANCE/VOXEL_SIZE)
+            kernel_size = math.ceil(DANGER_TOLERANCE/VOXEL_SIZE)
             kernel = list(range(-kernel_size,kernel_size+1))
             for dx in kernel:
                 for dy in kernel:
                     if dx != 0 or dy != 0:
                         ni = point_d[0] + dy
                         nj = point_d[1] + dx
-                        if (ni >= 0 and nj >= 0) and (ni < map.shape[0] and nj < map.shape[1]) and (map[ni, nj] == 0 or map[ni, nj] == 4):
-                            markMapDiscretizedPoint((ni, nj), map, value = 2)
+                        if (ni >= 0 and nj >= 0) and (ni < map.shape[0] and nj < map.shape[1]) and map[ni, nj] != 1:
+                            if (abs(dx) > collision_kernel_size or abs(dy) > collision_kernel_size) and map[ni, nj] != 2:
+                                markMapDiscretizedPoint((ni, nj), map, value = 3)
+                            else:
+                                markMapDiscretizedPoint((ni, nj), map, value = 2)
 
 def calculateVoxelCentroidPoint(i, j):
     point_m = [-1, -1]
@@ -151,7 +157,7 @@ def computeHFunction(goal, shape):
     
     return h_function
 
-def AStarPathSearch(position, goal, map, h_function):
+def AStarPathSearch(position, goal, map, h_function, free_danger_zone = False):
     rospy.loginfo('Finding a Path.....')
 
     path = []
@@ -163,6 +169,9 @@ def AStarPathSearch(position, goal, map, h_function):
     goal_d = discretizePoint(goal)
     if goal_d[0] == -1 or goal_d[1] == -1:
         return []
+
+    if map[position_d[0], position_d[1]] == 3 or map[goal_d[0], goal_d[1]] == 3:
+        free_danger_zone = True
 
     rows = map.shape[0]
     cols = map.shape[1]
@@ -199,7 +208,7 @@ def AStarPathSearch(position, goal, map, h_function):
                     ni = posi[0] + dy
                     nj = posi[1] + dx
                     if (ni >= 0 and nj >= 0) and (ni < map.shape[0] and nj < map.shape[1]):
-                        if (map[ni, nj] != 1 and map[ni, nj] != 2) or (ni, nj) == goal_d:
+                        if (map[ni, nj] != 1) and (map[ni, nj] != 2 or (ni, nj) == goal_d) and (map[ni, nj] != 3 or free_danger_zone):
                             neigh.append((ni, nj))
 
         for n in neigh:
@@ -310,22 +319,16 @@ def moveByPath(path, position, angle, last_action, map):
     return action
 
 def simplifyPath(path):
-    print('SIMPLIFING PATH')
     if len(path) <= 1:
         return path
     simplified_path = [path[0]]
     last_direction = (path[1][0] - path[0][0], path[1][1] - path[0][1])
-    print('last_dir:', last_direction)
     i = 1
     while i < len(path) - 1:
         p1 = path[i]
         p2 = path[i+1]
-        print('p1:', p1)
-        print('p2:', p1)
         direction = (p2[0] - p1[0], p2[1] - p1[1])
-        print('dir:', direction)
         if direction != last_direction:
-            print('added')
             if simplified_path[-1] != p1:
                 simplified_path.append(p1)
             simplified_path.append(p2)
@@ -345,8 +348,10 @@ if __name__ == "__main__":
 
     h_function = None
 
-    #0 = free | 1 = obstacle | 2 = danger zone | 3 = goal | 4 = path | 5 = current_position 
+    #0 = free | 1 = obstacle | 2 = collision zone | 3 = danger_zone
     local_map = mountMap()
+    #0 = free | 1 = obstacle | 2 = collision zone | 3 = danger zone | 4 = current_position | 5 = goal | 6 = path | 6 = simplified_path | 
+    view_map = np.copy(local_map)
 
     plt.axis([0,local_map.shape[0],0,local_map.shape[1]])
     plt.ion()
@@ -367,39 +372,48 @@ if __name__ == "__main__":
 
                 markLaserScan(state_scan, local_map, position, angle)
 
+                view_map = np.copy(local_map)
+
             if h_function is None:
                 h_function = computeHFunction(goal, local_map.shape)
     
             if not isValidPath(path, local_map):
                 env.step([0, 0])
                 path = AStarPathSearch(position, goal, local_map, h_function)
-                simp_path = simplifyPath(path)
                 if len(path) == 0:
-                    rospy.logerr('There is no way to go to the point, cleaning the map.')
+                    rospy.logerr('There is no way to go to the point, including danger-zone in possible path.')
+                    path = AStarPathSearch(position, goal, local_map, h_function)
+                    if len(path) == 0:
+                        VOXEL_SIZE/=2
+                        if VOXEL_SIZE <= VOXEL_SIZE_MIN:
+                            rospy.logfatal('There is no way to go to the point.')
+                            exit()
+                        else:
+                            rospy.logerr('There is no way to go to the point, increasing map resolution.')
+                            continue
+                simp_path = simplifyPath(path)
 
             for p in path:
-                markMapDiscretizedPoint(p, local_map, value = 4)
+                markMapDiscretizedPoint(p, view_map, value = 6)
             for p in simp_path:
-                markMapDiscretizedPoint(p, local_map, value = 6)    
-            
-            markMapPoint(position, local_map, value = 5)
-            markMapPoint(goal, local_map, value = 3)
+                markMapDiscretizedPoint(p, view_map, value = 7)    
+            markMapPoint(position, view_map, value = 4)
+            markMapPoint(goal, view_map, value = 5)
             
             action = moveByPath(simp_path, position, angle, action, local_map)
 
             state_scan = env.step(action)
 
-            plt.imshow(local_map)
+            plt.imshow(view_map)
             plt.draw()
             plt.pause(0.0001)
 
-            markMapPoint(position, local_map, value = 0)
-            markMapPoint(goal, local_map, value = 0)
+            markMapPoint(position, view_map, value = 0)
+            markMapPoint(goal, view_map, value = 0)
             for p in path:
-                markMapDiscretizedPoint(p, local_map, value = 0)
+                markMapDiscretizedPoint(p, view_map, value = 0)
             for p in simp_path:
-                markMapDiscretizedPoint(p, local_map, value = 0)    
-            markMapPoint(goal, local_map, value = 0)
+                markMapDiscretizedPoint(p, view_map, value = 0)    
 
         else:
             rospy.loginfo('Arrive to the goal, waiting for the next.')
