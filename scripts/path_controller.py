@@ -48,15 +48,17 @@ LINEAR_DCC = -0.15
 DIST_DCC = 0.2
 
 REACT_LINEAR_VEL_MAX = 0.3
-REACT_LINEAR_ACC = 0.3
+REACT_LINEAR_ACC = 0.2
 
 REACT_ANGULAR_VEL = 0.8
+
+FRONT_ANGLE = 60
 
 COLLISION_TOLERANCE = 0.13
 DANGER_TOLERANCE = 0.28
 REACT_TOLERANCE = 0.23
 
-MAX_PATH_AGE = 15
+MAX_PATH_AGE_STOPPED = 40
 
 REACT = False
 
@@ -200,7 +202,7 @@ def getBestFreeDiscretizedPosition(position_d, map, free_danger_zone):
                     if REACT:
                         None
                     p_position_d = (position_d[0] + dy, position_d[1] + dx)
-                    if map[p_position_d[0], p_position_d[1]] == 0:
+                    if map[p_position_d[0], p_position_d[1]] == 0 or (free_danger_zone and map[position_d[0], position_d[1]] == 3):
                         if new_position_d is None:
                             new_position_d = p_position_d
                         elif h_function[p_position_d[0]*cols + p_position_d[1]] < h_function[new_position_d[0]*cols + new_position_d[1]]:
@@ -232,12 +234,12 @@ def AStarPathSearch(position, goal, map, h_function, free_danger_zone = False):
         
     new_goal_d = getBestFreeDiscretizedPosition(goal_d, map, free_danger_zone)
 
-    if h_function[new_goal_d[0]*cols + new_goal_d[1]] < 0.2:
+    if h_function[new_goal_d[0]*cols + new_goal_d[1]] < 0.2 - DIST_TOLERANCE:
         goal_d = new_goal_d
     else:
         free_danger_zone = True
         new_goal_d = getBestFreeDiscretizedPosition(goal_d, map, free_danger_zone)
-        if h_function[new_goal_d[0]*cols + new_goal_d[1]] < 0.2:
+        if h_function[new_goal_d[0]*cols + new_goal_d[1]] < 0.2 - DIST_TOLERANCE:
             goal_d = new_goal_d
         else:
             return [], False
@@ -327,6 +329,26 @@ def projPointInLine(A, P, v):
 
     return A_proj
 
+def simplifyPath(path):
+    if len(path) <= 1:
+        return path
+    simplified_path = [path[0]]
+    last_direction = (path[1][0] - path[0][0], path[1][1] - path[0][1])
+    i = 1
+    while i < len(path) - 1:
+        p1 = path[i]
+        p2 = path[i+1]
+        direction = (p2[0] - p1[0], p2[1] - p1[1])
+        if direction != last_direction:
+            if simplified_path[-1] != p1:
+                simplified_path.append(p1)
+            simplified_path.append(p2)
+        last_direction = direction
+        i += 1
+    simplified_path.append(path[-1])
+    return simplified_path
+
+
 def superSimplifyPath(path, map):
     global REACT
     if len(path) <= 1:
@@ -371,7 +393,7 @@ def superSimplifyPath(path, map):
                         distance = np.linalg.norm(P - P_proj, ord=2)
                         dp = np.linalg.norm(current_position_c - P_proj, ord=2)
                         dg = np.linalg.norm(goal_c - P_proj, ord=2)
-                        if distance <= (COLLISION_TOLERANCE + DIST_TOLERANCE) and dp < distance_p_g and dg < distance_p_g:
+                        if distance <= (REACT_TOLERANCE + DIST_TOLERANCE) and dp < distance_p_g and dg < distance_p_g:
                             POSSIBLE = False
                             break
                 if POSSIBLE == False:
@@ -384,26 +406,6 @@ def superSimplifyPath(path, map):
                 break
         
     return simp_path
-
-def simplifyPath(path):
-    if len(path) <= 1:
-        return path
-    simplified_path = [path[0]]
-    last_direction = (path[1][0] - path[0][0], path[1][1] - path[0][1])
-    i = 1
-    while i < len(path) - 1:
-        p1 = path[i]
-        p2 = path[i+1]
-        direction = (p2[0] - p1[0], p2[1] - p1[1])
-        if direction != last_direction:
-            if simplified_path[-1] != p1:
-                simplified_path.append(p1)
-            simplified_path.append(p2)
-        last_direction = direction
-        i += 1
-    simplified_path.append(path[-1])
-    return simplified_path
-
 
 #NAVIGATION
 
@@ -454,10 +456,12 @@ def computeLinearVelocity(distance, vzero, init_vel = LINEAR_VEL_MIN, min_vel = 
     else:
         vel = init_vel
 
+
     if vel > max_vel:
         vel = max_vel
     elif vel < min_vel:
         vel = min_vel
+
     
     last_torr_time = secs
     return vel
@@ -486,12 +490,11 @@ def robotAlign(diff, last_ang_vel):
     return computeAngularVelocity(diff, last_ang_vel)
 
 def robotGo(distance, last_lin_vel):
-    if last_lin_vel == 0 and abs(distance) < DIST_DCC:
-        return computeLinearVelocity(distance, last_lin_vel, init_vel=LINEAR_VEL_MIN*2)
-    
-    return computeLinearVelocity(distance, last_lin_vel)
- 
+    return computeLinearVelocity(distance, last_lin_vel, init_vel=LINEAR_VEL_MIN*2)
+
+move_state = 0
 def move(position, angle, goal, goal_dir, last_action):
+    global move_state
     action = [0, 0]
 
     pg = np.array([goal[0] - position[0], goal[1] - position[1]])
@@ -499,6 +502,7 @@ def move(position, angle, goal, goal_dir, last_action):
     distance = np.dot(pg, goal_dir)
 
     if abs(distance) < DIST_TOLERANCE or distance < 0:
+        move_state = 0
         return [0, 0], True
 
     x_axis = np.array([1, 0])
@@ -509,18 +513,18 @@ def move(position, angle, goal, goal_dir, last_action):
     
     diff = computeMinDiffAngles(angle, final_angle)
 
-    if last_action[1] != 0:
+    if move_state == 0:
         action[1] = robotAlign(diff, last_action[1])
-    elif last_action[0] != 0:
-        if abs(diff) >= 2*ANGLE_TOLERANCE*math.pi/180 and last_action[0] == LINEAR_VEL_MIN:
-            action[0] = 0
-        elif abs(diff) >= 2*ANGLE_TOLERANCE*math.pi/180:
-            action[0] = robotGo(DIST_DCC - DIST_DCC/2, last_action[0])
-        else:
-            action[0] = robotGo(distance, last_action[0])
-    else:
-        if abs(diff) > ANGLE_TOLERANCE*math.pi/180:
+        if action[1] == 0:
+            move_state = 1
+    elif move_state == 1:
+        if abs(diff) >= ANGLE_TOLERANCE*math.pi/180:
             action[1] = robotAlign(diff, last_action[1])
+        if abs(diff) >= 3*ANGLE_TOLERANCE*math.pi/180 and last_action[0] <= LINEAR_VEL_MIN*2:
+            action[0] = 0
+            move_state = 1
+        elif abs(diff) >= 3*ANGLE_TOLERANCE*math.pi/180:
+            action[0] = robotGo(DIST_DCC - DIST_DCC/2, last_action[0])
         else:
             action[0] = robotGo(distance, last_action[0])
 
@@ -552,7 +556,7 @@ def moveByPath(path, position, angle, last_action):
 
 #REACTIVE
 
-def computeDangerAngles(ranges):
+def computeDangerAngle(ranges):
     nozero = ranges > 0
     danger_arr = ranges <= REACT_TOLERANCE
 
@@ -598,15 +602,17 @@ action = np.zeros(2)
 def computeReactAction(ranges):
     global action
 
-    danger_angle = computeDangerAngles(ranges)
+    danger_angle = computeDangerAngle(ranges)
 
     diff = danger_angle
 
+    react_action = list(action)
+
     diff_to_escape = 0
-    if abs(diff) <= math.pi/4:
-        if action[0] > 0:
-            action[0] = 0
-        action[0] = -computeLinearVelocity(ranges[int(180*ANGLE_INCREMENT*180/math.pi)], abs(action[0]), init_vel = LINEAR_VEL_MAX, max_vel=REACT_LINEAR_VEL_MAX, acc = REACT_LINEAR_ACC)
+    if abs(diff) <= (FRONT_ANGLE/2)*math.pi/180:
+        if react_action[0] > 0:
+            react_action[0] = 0
+        react_action[0] = -computeLinearVelocity(ranges[int(180*ANGLE_INCREMENT*180/math.pi)], abs(react_action[0]), init_vel = LINEAR_VEL_MAX/2, max_vel=REACT_LINEAR_VEL_MAX, acc = REACT_LINEAR_ACC)
         diff_to_escape = math.pi/2 - abs(diff)
         if diff < 0:
             diff_to_escape = -diff_to_escape
@@ -614,32 +620,46 @@ def computeReactAction(ranges):
         diff_to_escape = math.pi/2 - abs(diff)
         if diff < 0:
             diff_to_escape = -diff_to_escape
-        if action[0] > 0:
-            action[0] =  computeLinearVelocity(ranges[0], abs(action[0]), init_vel = LINEAR_VEL_MAX/2, max_vel=REACT_LINEAR_VEL_MAX, acc = REACT_LINEAR_ACC)
+        if react_action[0] > 0:
+            react_action[0] =  computeLinearVelocity(ranges[0], abs(react_action[0]), init_vel = LINEAR_VEL_MAX/2, max_vel=REACT_LINEAR_VEL_MAX, acc = REACT_LINEAR_ACC)
             diff_to_escape = -diff_to_escape
+            if(ranges[0] < DANGER_TOLERANCE):
+               react_action[0] = -computeLinearVelocity(ranges[int(180*ANGLE_INCREMENT*180/math.pi)], 0, init_vel = LINEAR_VEL_MAX/2, max_vel=REACT_LINEAR_VEL_MAX, acc = REACT_LINEAR_ACC) 
+               diff_to_escape = math.pi/2
         else:
-            action[0] = -computeLinearVelocity(ranges[int(180*ANGLE_INCREMENT*180/math.pi)], abs(action[0]), init_vel = LINEAR_VEL_MAX/2, max_vel=REACT_LINEAR_VEL_MAX, acc = REACT_LINEAR_ACC)
-    elif abs(diff) <= 3*math.pi/4:
+            react_action[0] = -computeLinearVelocity(ranges[int(180*ANGLE_INCREMENT*180/math.pi)], abs(react_action[0]), init_vel = LINEAR_VEL_MAX/2, max_vel=REACT_LINEAR_VEL_MAX, acc = REACT_LINEAR_ACC)
+            if(ranges[int(180*ANGLE_INCREMENT*180/math.pi)] < DANGER_TOLERANCE):
+               react_action[0] = computeLinearVelocity(ranges[0], 0, init_vel = LINEAR_VEL_MAX/2, max_vel=REACT_LINEAR_VEL_MAX, acc = REACT_LINEAR_ACC)
+               diff_to_escape = -math.pi/2
+    elif abs(diff) <= (math.pi - (FRONT_ANGLE/2)*math.pi/180):
         diff_to_escape = abs(diff) - math.pi/2
         if diff > 0:
             diff_to_escape = -diff_to_escape
-        if action[0] < 0:
-            action[0] = -computeLinearVelocity(ranges[int(180*ANGLE_INCREMENT*180/math.pi)], abs(action[0]), init_vel = LINEAR_VEL_MAX/2, max_vel=REACT_LINEAR_VEL_MAX, acc = REACT_LINEAR_ACC)
+        if react_action[0] < 0:
+            react_action[0] = -computeLinearVelocity(ranges[int(180*ANGLE_INCREMENT*180/math.pi)], abs(react_action[0]), init_vel = LINEAR_VEL_MAX/2, max_vel=REACT_LINEAR_VEL_MAX, acc = REACT_LINEAR_ACC)
             diff_to_escape = -diff_to_escape
+            if(ranges[int(180*ANGLE_INCREMENT*180/math.pi)] < DANGER_TOLERANCE):
+               react_action[0] = computeLinearVelocity(ranges[0], 0, init_vel = LINEAR_VEL_MAX/2, max_vel=REACT_LINEAR_VEL_MAX, acc = REACT_LINEAR_ACC) 
+               diff_to_escape = math.pi/2
         else:
-            action[0] = computeLinearVelocity(ranges[0], abs(action[0]), init_vel = LINEAR_VEL_MAX/2, max_vel=REACT_LINEAR_VEL_MAX, acc = REACT_LINEAR_ACC)
+            react_action[0] = computeLinearVelocity(ranges[0], abs(react_action[0]), init_vel = LINEAR_VEL_MAX/2, max_vel=REACT_LINEAR_VEL_MAX, acc = REACT_LINEAR_ACC)
+            if(ranges[0] < DANGER_TOLERANCE):
+               react_action[0] = -computeLinearVelocity(ranges[int(180*ANGLE_INCREMENT*180/math.pi)], 0, init_vel = LINEAR_VEL_MAX/2, max_vel=REACT_LINEAR_VEL_MAX, acc = REACT_LINEAR_ACC) 
+               diff_to_escape = -math.pi/2
     else:
-        if action[0] < 0:
-            action[0] = 0
-        action[0] = computeLinearVelocity(ranges[0], abs(action[0]), init_vel = LINEAR_VEL_MAX, max_vel=REACT_LINEAR_VEL_MAX, acc = REACT_LINEAR_ACC)
+        if react_action[0] < 0:
+            react_action[0] = 0
+        react_action[0] = computeLinearVelocity(ranges[0], abs(react_action[0]), init_vel = LINEAR_VEL_MAX/2, max_vel=REACT_LINEAR_VEL_MAX, acc = REACT_LINEAR_ACC)
         diff_to_escape = abs(diff) - math.pi/2
         if diff > 0:
             diff_to_escape = -diff_to_escape
     
-    if diff_to_escape*action[1] >= 0:
-        action[1] = computeAngularVelocity(diff_to_escape, action[1], init_vel = REACT_ANGULAR_VEL, max_vel = REACT_ANGULAR_VEL)
+    if diff_to_escape*react_action[1] >= 0:
+        react_action[1] = computeAngularVelocity(diff_to_escape, react_action[1], init_vel = REACT_ANGULAR_VEL, max_vel = REACT_ANGULAR_VEL)
     else:
-        action[1] = computeAngularVelocity(-diff_to_escape, action[1], init_vel = REACT_ANGULAR_VEL, max_vel = REACT_ANGULAR_VEL)
+        react_action[1] = computeAngularVelocity(-diff_to_escape, react_action[1], init_vel = REACT_ANGULAR_VEL, max_vel = REACT_ANGULAR_VEL)
+    
+    return react_action
 
 def reactivity(data):
     global REACT, action
@@ -653,13 +673,14 @@ def reactivity(data):
             ranges.append(data.ranges[i])
     ranges = np.array(ranges)
     i = np.argmin(ranges)
-    if ranges[i] <= REACT_TOLERANCE and ranges[i] > 0:
+    if ranges[i] <= REACT_TOLERANCE:
         REACT = True
-        computeReactAction(ranges)
-        env.step(action, scan_data = data)
+        react_action = computeReactAction(ranges)
+        env.step(react_action, scan_data = data)
+        action = np.array(react_action)
     else:
         if REACT == True:
-            action = [0, 0]
+            action = np.zeros(2)
             env.step(action, scan_data = data)
         REACT = False
 
@@ -681,7 +702,7 @@ if __name__ == "__main__":
 
     last_goal = None
 
-    path_age = 0
+    path_age_stopped = 0
     path_tries = 0
 
     plt.axis([0,local_map.shape[1],0,local_map.shape[0]])
@@ -694,7 +715,7 @@ if __name__ == "__main__":
         if REACT == True:
             path = []
             simp_path = []
-            path_age = 0
+            path_age_stopped = 0
             path_tries = 0
 
         else:
@@ -710,7 +731,7 @@ if __name__ == "__main__":
                 path = []
                 simp_path = []
                 h_function = computeHFunction(goal, local_map.shape)
-                path_age = 0
+                path_age_stopped = 0
                 path_tries = 0
                 action[0] = 0
                 action[1] = 0
@@ -724,7 +745,13 @@ if __name__ == "__main__":
 
                 view_map = np.copy(local_map)
 
-                path_age += 1
+                # simp_path = superSimplifyPath(simp_path, local_map)
+                # if REACT:
+                #     continue
+
+                path_age_stopped += 1
+            else:
+                path_age_stopped = 0
             
             if MAP_RESIZE is not None:
                 rospy.loginfo('Increasing Map Size(x, y): {}'.format(tuple(MAP_RESIZE)))
@@ -737,7 +764,7 @@ if __name__ == "__main__":
 
                 path = []
                 simp_path = []
-                path_age = 0
+                path_age_stopped = 0
                 path_tries = 0
                 h_function = computeHFunction(goal, local_map.shape)
 
@@ -747,7 +774,7 @@ if __name__ == "__main__":
 
                 continue
     
-            if not isValidPath(path, local_map) or path_age > MAX_PATH_AGE:
+            if not isValidPath(path, local_map) or path_age_stopped > MAX_PATH_AGE_STOPPED:
                 rospy.loginfo('Finding a Path.....')
                 #stoping the robot and getting more reliable sensor readings
                 action = np.array([0, 0])
@@ -782,7 +809,7 @@ if __name__ == "__main__":
                     continue
                 elif len(path) > 0:
                     rospy.loginfo('Path Found.')
-                    path_age = 0
+                    path_age_stopped = 0
                     path_tries = 0
                     simp_path = superSimplifyPath(path, local_map)
                     if REACT:
