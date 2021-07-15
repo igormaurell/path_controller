@@ -97,7 +97,7 @@ class Env():
         
         rospy.loginfo("Number of targets %s / distance to curent goal %s / collission number %s", self.goal_numbers, distance, self.collision_numbers)
         
-    def step(self, action):
+    def step(self, action, scan_data = None):
         liner_vel = action[0]
         ang_vel = action[1]
         
@@ -109,14 +109,14 @@ class Env():
         vel_cmd.angular.z = ang_vel
         self.pub_cmd_vel.publish(vel_cmd)
 
-        data = None
-        while data is None:
+
+        while scan_data is None:
             try:
-                data = rospy.wait_for_message('scan', LaserScan, timeout=5)
+                scan_data = rospy.wait_for_message('scan', LaserScan, timeout=5)
             except:
                 pass
-
-        state, distance, collision, goal = self.getState(data)
+    
+        state, distance, collision, goal = self.getState(scan_data)
         
         self.report_goal_distance(distance, collision, goal)
 
